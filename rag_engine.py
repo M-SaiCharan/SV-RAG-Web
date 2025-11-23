@@ -1,8 +1,7 @@
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-# --- THE FIX: Document is now in langchain_core ---
-from langchain_core.documents import Document 
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.docstore.document import Document
 from transformers import pipeline
 from langchain_community.llms import HuggingFacePipeline
 import torch
@@ -19,7 +18,7 @@ class RAGChatbot:
             device = "mps"
         
         print(f"Loading LLM on {device}...")
-        # Using Flan-T5-Large
+        # We increase max_length to ensure it doesn't cut off the answer
         pipe = pipeline(
             "text2text-generation", 
             model="google/flan-t5-large", 
@@ -43,11 +42,12 @@ class RAGChatbot:
         docs = self.vector_store.similarity_search(query, k=4)
         context = "\n".join([d.page_content for d in docs])
         
-        # Debugging logs
+        # --- DEBUGGING (Look at your terminal!) ---
         print(f"\n[DEBUG] Question: {query}")
-        print(f"[DEBUG] Retrieved Context: {context[:200]}...") 
+        print(f"[DEBUG] Retrieved Context: {context[:200]}...") # Print first 200 chars
         
-        # Optimized Prompt
+        # --- THE FIX: QUESTION FIRST, CONTEXT LAST ---
+        # Flan-T5 works best when it sees the Question immediately.
         prompt = f"""
         Answer the question using only the context provided below.
         
