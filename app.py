@@ -4,9 +4,11 @@ import tempfile
 import torch
 import pandas as pd
 import base64
+import numpy as np
+from PIL import Image
 from io import BytesIO
 from streamlit_agraph import agraph, Node, Edge, Config
-from fpdf import FPDF  # <--- NEW IMPORT
+from fpdf import FPDF
 
 # Import your modules
 from keyframe_extractor import SemanticKeyframeExtractor
@@ -24,6 +26,11 @@ st.markdown("""
         background: linear-gradient(45deg, #2563eb, #7c3aed);
         color: white; border: none; border-radius: 8px;
     }
+    .metric-card {
+        background-color: #1f2937; padding: 15px; border-radius: 10px;
+        text-align: center; border: 1px solid #374151;
+    }
+    .metric-val { font-size: 24px; font-weight: bold; color: #a78bfa; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -34,7 +41,7 @@ def image_to_base64(img):
     img_str = base64.b64encode(buffered.getvalue()).decode()
     return f"data:image/jpeg;base64,{img_str}"
 
-# --- NEW: PDF GENERATOR CLASS ---
+# --- PDF GENERATOR CLASS ---
 class PDFReport(FPDF):
     def header(self):
         self.set_font('Arial', 'B', 15)
@@ -53,35 +60,29 @@ def create_pdf(data_list):
     pdf.set_font("Arial", size=12)
     
     for item in data_list:
-        # Time and Confidence
         pdf.set_font("Arial", 'B', 12)
         pdf.cell(0, 10, f"Timestamp: {item['Timestamp']} | Confidence: {item['RawConfidence']:.2%}", 0, 1)
         
-        # Insight Text
         pdf.set_font("Arial", size=11)
-        # Multi_cell handles text wrapping
         pdf.multi_cell(0, 10, f"Insight: {item['AI Insight']}")
         
-        # Image (Thumbnail)
-        # We use the physical path stored in 'ThumbnailPath'
         if 'ThumbnailPath' in item and os.path.exists(item['ThumbnailPath']):
-            # x=10 (left margin), w=100 (width)
             pdf.image(item['ThumbnailPath'], x=10, w=100)
-            pdf.ln(60) # Move down 60 units after image to prevent overlap
+            pdf.ln(60) 
         else:
             pdf.ln(5)
             
-        pdf.line(10, pdf.get_y(), 200, pdf.get_y()) # Draw separator line
+        pdf.line(10, pdf.get_y(), 200, pdf.get_y())
         pdf.ln(10)
         
     return pdf.output(dest='S').encode('latin-1')
 
-# --- STATE ---
+# --- STATE MANAGEMENT ---
 if "rag_bot" not in st.session_state: st.session_state.rag_bot = None
 if "messages" not in st.session_state: st.session_state.messages = []
 if "graph_data" not in st.session_state: st.session_state.graph_data = {"nodes": [], "edges": []}
 if "df_insights" not in st.session_state: st.session_state.df_insights = None
-if "table_data" not in st.session_state: st.session_state.table_data = [] # <--- Stores data for PDF
+if "table_data" not in st.session_state: st.session_state.table_data = []
 
 # --- SIDEBAR ---
 with st.sidebar:
@@ -103,8 +104,10 @@ with st.sidebar:
 # --- MAIN ---
 st.markdown("# 🔬 SV-RAG: Semantic Video Analysis")
 
-tab1, tab2, tab3 = st.tabs(["📊 Analysis & Data", "🕸️ Interactive Graph", "💬 Chat"])
+# Added the 4th Tab here
+tab1, tab2, tab3, tab4 = st.tabs(["📊 Analysis & Data", "🕸️ Interactive Graph", "💬 Chat", "🕵️ Visual Detective"])
 
+# --- TAB 1: ANALYSIS ---
 with tab1:
     uploaded_file = st.file_uploader("Upload Video (MP4)", type=["mp4"])
     
@@ -120,18 +123,15 @@ with tab1:
             if st.button("🚀 Initialize Research Pipeline", use_container_width=True):
                 with st.status("Running Adaptive Pipeline...", expanded=True) as status:
                     
-                    # 1. Extract
                     st.write("🔍 Extracting frames...")
                     extractor = SemanticKeyframeExtractor()
                     raw_frames, timestamps = extractor.extract_frames(video_path, sample_rate)
                     
-                    # 2. Cluster
                     st.write("🧠 Clustering Scenes...")
                     keyframes, key_timestamps = extractor.cluster_and_select(
                         raw_frames, timestamps, n_clusters=n_clusters, use_adaptive=use_adaptive
                     )
                     
-                    # 3. Caption & Build Table Data
                     st.write("👁️ Analyzing Keyframes (BLIP)...")
                     captioner = VideoCaptioner()
                     
@@ -141,8 +141,7 @@ with tab1:
                     existing_ids = set()
                     table_data = [] 
                     
-                    # Create a temp directory for PDF images
-                    # We need physical files for the PDF generator, it can't use RAM bytes
+                    # Temp dir for PDF/Search images
                     thumb_dir = tempfile.mkdtemp()
                     
                     progress = st.progress(0)
@@ -150,27 +149,22 @@ with tab1:
                         caption, conf = captioner.generate_caption(frame)
                         time_str = f"{int(ts)//60:02d}:{int(ts)%60:02d}"
                         
-                        # A. Save Physical Image for PDF
                         img_path = os.path.join(thumb_dir, f"frame_{i}.jpg")
                         frame.save(img_path)
-                        
-                        # B. Convert to Base64 for Screen Display
                         img_base64 = image_to_base64(frame)
                         
-                        # C. Data Collection
                         insights.append(f"[{time_str}] {caption}")
                         
-                        # We store everything we need for BOTH the Table and the PDF here
                         table_data.append({
-                            "Keyframe": img_base64,      # For Streamlit Table
-                            "ThumbnailPath": img_path,   # For PDF Report
+                            "Keyframe": img_base64,
+                            "ThumbnailPath": img_path,
                             "Timestamp": time_str,
                             "AI Insight": caption,
-                            "RawConfidence": conf,       # Number (0.85)
-                            "Confidence": conf           # Duplicate for DataFrame display
+                            "RawConfidence": conf,
+                            "Confidence": conf
                         })
                         
-                        # D. Graph Logic
+                        # Graph Logic
                         node_id_time = f"t_{i}"
                         if node_id_time not in existing_ids:
                             nodes.append(Node(id=node_id_time, label=time_str, size=15, color="#7c3aed", shape="ellipse"))
@@ -184,15 +178,10 @@ with tab1:
                         edges.append(Edge(source=node_id_time, target=node_id_concept))
                         progress.progress((i+1)/len(keyframes))
                     
-                    # Store Results in Session State
                     st.session_state.graph_data = {"nodes": nodes, "edges": edges}
                     st.session_state.df_insights = pd.DataFrame(table_data)
+                    st.session_state.table_data = table_data # Saving for Tab 4 Search
                     
-                    # --- THIS IS THE LINE YOU ASKED ABOUT ---
-                    # We save the full list (with paths) so the PDF button can read it later
-                    st.session_state.table_data = table_data 
-                    
-                    # 4. RAG
                     st.write("📚 Indexing Knowledge...")
                     rag = RAGChatbot()
                     rag.ingest_insights(insights)
@@ -200,12 +189,10 @@ with tab1:
                     
                     status.update(label="Complete!", state="complete", expanded=False)
 
-    # --- RESULTS DISPLAY ---
     if st.session_state.df_insights is not None:
         st.divider()
         st.subheader("📋 Structural Video Analysis Data")
         
-        # 1. The Interactive Table
         st.dataframe(
             st.session_state.df_insights,
             column_config={
@@ -213,12 +200,8 @@ with tab1:
                 "Timestamp": st.column_config.TextColumn("Time", width="small"),
                 "AI Insight": st.column_config.TextColumn("Visual Conclusion", width="large"),
                 "Confidence": st.column_config.ProgressColumn(
-                    "Model Confidence", 
-                    min_value=0, 
-                    max_value=1, 
-                    format="%.2f%%"
+                    "Model Confidence", min_value=0, max_value=1, format="%.2f%%"
                 ),
-                # Hide the internal path column from the UI
                 "ThumbnailPath": None,
                 "RawConfidence": None
             },
@@ -226,17 +209,11 @@ with tab1:
             hide_index=True
         )
         
-        # 2. The PDF Download Section (Feature 2)
         st.divider()
-        st.subheader("📄 Export Research Report")
-        
-        # Check if we have data to print
         if "table_data" in st.session_state and st.session_state.table_data:
             col_pdf, col_space = st.columns([1, 2])
             with col_pdf:
-                # Generate PDF Bytes on the fly
                 pdf_bytes = create_pdf(st.session_state.table_data)
-                
                 st.download_button(
                     label="📥 Download PDF Report",
                     data=pdf_bytes,
@@ -245,24 +222,16 @@ with tab1:
                     use_container_width=True
                 )
 
+# --- TAB 2: GRAPH ---
 with tab2:
     st.subheader("🕸️ Interactive Knowledge Graph")
     col_graph, col_details = st.columns([3, 1])
-    
     selected_node = None 
     
     with col_graph:
         if st.session_state.graph_data["nodes"]:
-            config = Config(
-                width=800, height=600, 
-                directed=True, physics=True, 
-                hierarchical=False, 
-                nodeSpacing=200, 
-                solver='forceAtlas2Based'
-            )
-            selected_node = agraph(nodes=st.session_state.graph_data["nodes"], 
-                                 edges=st.session_state.graph_data["edges"], 
-                                 config=config)
+            config = Config(width=800, height=600, directed=True, physics=True, hierarchical=False, nodeSpacing=200, solver='forceAtlas2Based')
+            selected_node = agraph(nodes=st.session_state.graph_data["nodes"], edges=st.session_state.graph_data["edges"], config=config)
         else:
             st.info("No graph data available. Please run the analysis first.")
 
@@ -270,10 +239,11 @@ with tab2:
         st.markdown("### 🔎 Node Details")
         if selected_node:
             st.success(f"Selected: **{selected_node}**")
-            st.write("This node represents a distinct semantic concept or timestamp found in the video.")
+            st.write("This node represents a distinct semantic concept or timestamp.")
         else:
-            st.write("Click on a node in the graph to see details here.")
+            st.write("Click on a node to see details.")
 
+# --- TAB 3: CHAT ---
 with tab3:
     st.subheader("💬 Q&A Interface")
     for msg in st.session_state.messages:
@@ -289,3 +259,70 @@ with tab3:
             final_ans = f"{ans}\n\n_Context: {ctx}_"
             st.session_state.messages.append({"role": "assistant", "content": final_ans})
             st.chat_message("assistant").write(final_ans)
+
+# --- TAB 4: VISUAL DETECTIVE (NEW) ---
+with tab4:
+    st.subheader("🕵️ Visual Detective (Zero-Shot Search)")
+    st.markdown("Upload an image of an object (e.g., a backpack, a car) to find similar frames in the video.")
+    
+    if "table_data" not in st.session_state or not st.session_state.table_data:
+        st.warning("⚠️ Please run the Video Analysis in Tab 1 first to extract keyframes.")
+    else:
+        search_file = st.file_uploader("Upload Query Image", type=["jpg", "png", "jpeg"])
+        
+        if search_file:
+            col_q, col_res = st.columns([1, 2])
+            
+            with col_q:
+                st.write("**Query Image**")
+                query_image = Image.open(search_file)
+                st.image(query_image, width=200)
+                
+            with col_res:
+                if st.button("🔍 Find Matches"):
+                    with st.spinner("Embedding query and comparing vectors..."):
+                        # 1. Load Keyframes from disk (using paths saved in Tab 1)
+                        # This prevents storing massive image arrays in RAM
+                        keyframes = []
+                        valid_indices = []
+                        for idx, item in enumerate(st.session_state.table_data):
+                            if os.path.exists(item['ThumbnailPath']):
+                                keyframes.append(Image.open(item['ThumbnailPath']))
+                                valid_indices.append(idx)
+                        
+                        # 2. Initialize Extractor (Loads CLIP)
+                        # We re-init here. In a prod app, we'd cache the model load.
+                        extractor = SemanticKeyframeExtractor()
+                        
+                        # 3. Compute Embeddings
+                        # Shape: (1, 512)
+                        query_emb = extractor.get_embeddings([query_image])
+                        # Shape: (N, 512)
+                        keyframe_embs = extractor.get_embeddings(keyframes)
+                        
+                        # 4. Cosine Similarity
+                        # Since embeddings are normalized, Dot Product = Cosine Sim
+                        scores = np.dot(keyframe_embs, query_emb.T).flatten()
+                        
+                        # 5. Get Top 3 Matches
+                        # argsort gives ascending, so we take last 3 and reverse
+                        top_indices = np.argsort(scores)[-3:][::-1]
+                        
+                        st.success("Search Complete! Top Matches:")
+                        
+                        # 6. Display Results
+                        for rank, idx in enumerate(top_indices):
+                            real_idx = valid_indices[idx]
+                            match_data = st.session_state.table_data[real_idx]
+                            score = scores[idx]
+                            
+                            with st.container():
+                                c1, c2 = st.columns([1, 3])
+                                with c1:
+                                    st.image(match_data['ThumbnailPath'], width=150)
+                                with c2:
+                                    st.markdown(f"### Match #{rank+1}")
+                                    st.markdown(f"**Timestamp:** `{match_data['Timestamp']}`")
+                                    st.markdown(f"**Similarity Score:** `{score:.4f}`")
+                                    st.caption(f"Context: {match_data['AI Insight']}")
+                                st.divider()
